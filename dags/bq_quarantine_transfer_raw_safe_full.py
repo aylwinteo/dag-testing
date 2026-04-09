@@ -7,7 +7,6 @@ from airflow.exceptions import AirflowSkipException
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-# ---------------- Configuration ----------------
 SOURCE_PROJECT = "quarantine-project"
 TARGET_PROJECT = "prod-project"
 DATASET = "your_dataset"
@@ -17,13 +16,11 @@ LOOKBACK_DAYS = 4
 TIMESTAMP_COLUMN = "last_modified"
 SGT = ZoneInfo("Asia/Singapore")
 
-# ---------------- Helper Functions ----------------
 def generate_table_name(prefix, date_str):
     clean_date = date_str.replace('-', '')
     return f"{prefix}_{clean_date}"
 
 def get_bq_client():
-    """Get a fresh BigQuery client"""
     hook = BigQueryHook()
     return hook.get_client()
 
@@ -106,7 +103,6 @@ def daily_report(**context):
         print(f"{table_name}: {'READY' if status else 'SKIPPED'}")
     print("=====================================================")
 
-# ---------------- DAG ----------------
 with DAG(
     dag_id="bq_quarantine_transfer_raw_safe_full",
     start_date=datetime(2024, 1, 1, tzinfo=SGT),
@@ -148,4 +144,3 @@ with DAG(
         )
 
         check_task >> build_sql_task >> transfer_task >> report_task
-
