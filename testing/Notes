@@ -1,0 +1,21 @@
+from pyiceberg.catalog import load_catalog
+import bigframes.pandas as bpd
+
+# 1. Load your Iceberg catalog and resolve both tables
+catalog = load_catalog("default")
+table_a = catalog.load_table("my_namespace.iceberg_table_a")
+table_b = catalog.load_table("my_namespace.iceberg_table_b")
+
+# 2. Extract the Arrow dataset file layouts (this is lightweight metadata, not raw rows)
+arrow_scan_a = table_a.scan().to_arrow()
+arrow_scan_b = table_b.scan().to_arrow()
+
+# 3. Configure BigFrames with your mandatory CMEK key
+bpd.options.bigquery.kms_key_name = "projects/your-project/locations/your-location/keyRings/your-ring/cryptoKeys/your-key"
+
+# 4. Stream both Arrow manifests straight into BigFrames
+df_a = bpd.read_gbq(arrow_scan_a)
+df_b = bpd.read_gbq(arrow_scan_b)
+
+# 5. Execute the massive join completely on BigQuery compute
+df_joined = bpd.merge(df_a, df_b, on="common_id")
