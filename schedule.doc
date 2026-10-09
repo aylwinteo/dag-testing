@@ -1,0 +1,668 @@
+AMLPSGG - Scheduling multiple ipynb
+DAG Scheduling:
+1.	To update the DAG you must place it in the folder of the composer > dags (folder)(e.g. gs://us-central1-testcomposer-9d6c1b93-bucket/dags)
+2.	There will be a original template in the same bucket location one you create your first schedule
+3.	You will be required to state the location of your .ipnyb files
+4.	You will require the following roles before starting example:
+!gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+    --member="serviceAccount:service-192547025355@cloudcomposer-accounts.iam.gserviceaccount.com" \
+    --role="roles/composer.serviceAgent"
+5.	Below is an example of how to edit your DAG.py, this example is to run 2 notebooks simultaneously with example notebooka as a dependency before running notebookb:
+DAG with 2 notebook dependencies 
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from datetime import datetime, timedelta, timezone
+from airflow import DAG
+from airflow.providers.google.cloud.operators.dataproc import DataprocSubmitJobOperator
+from airflow.operators.python_operator import PythonOperator
+from google.cloud import dataproc_v1
+from google.api_core.client_options import ClientOptions
+
+default_args = {
+    'owner': '819128668990-compute',
+    'start_date': '2025-11-17 08:37:44.694158+08:00',
+    'retries': '0',
+    'retry_delay': timedelta(minutes=int('5')),
+    'email': [],
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'email_on_success': False
+}
+
+def write_output_to_file(run_id, notebook_name, **kwargs):
+    # This function now takes notebook_name to create unique output paths
+    output_file_path = f"gs://us-central1-testcomposer-9d6c1b93-bucket/dataproc-output/7run/output-notebooks/{notebook_name.replace('.ipynb', '')}_{run_id}.ipynb"
+    print(output_file_path)
+    kwargs['ti'].xcom_push(key=f'output_file_path_{notebook_name.replace(".ipynb", "")}', value=output_file_path)
+    return output_file_path
+
+time_zone = 'Asia/Singapore'
+stop_cluster_check = 'False' # This value is hardcoded as 'False', so the stop_the_cluster function will never execute.
+
+def get_client_cert():
+    # code to load client certificate and private key.
+    # IMPORTANT: Ensure this function is correctly implemented to fetch credentials securely.
+    # For a typical Cloud Composer setup, service account credentials often handle authentication,
+    # so a client certificate might not be strictly necessary unless specific security policies require it.
+    return client_cert_bytes, client_private_key_bytes
+
+def get_cluster_state_start_if_not_running():
+    # This function attempts to start the cluster if it's not running.
+    # Ensure client_cert_source is properly configured if required.
+    try:
+        options = ClientOptions(api_endpoint="us-central1-dataproc.googleapis.com:443",
+        client_cert_source=get_client_cert)
+    except NameError:
+        # Fallback if get_client_cert is not defined or not needed for the environment
+        options = ClientOptions(api_endpoint="us-central1-dataproc.googleapis.com:443")
+
+    client = dataproc_v1.ClusterControllerClient(client_options=options)
+    request = dataproc_v1.GetClusterRequest(
+        project_id='qwiklabs-gcp-03-6e8213d90fd1',
+        region='us-central1',
+        cluster_name='my-ac-cluster',
+    )
+    response = client.get_cluster(request=request)
+
+    print(f"State is {response.status.state}")
+    if response.status.state in (6, 7): # STOPPED or STOPPING
+        print("Cluster is in stopped/stopping state. Starting the cluster")
+        request1 = dataproc_v1.StartClusterRequest(
+            project_id='qwiklabs-gcp-03-6e8213d90fd1',
+            region='us-central1',
+            cluster_name='my-ac-cluster',
+        )
+        operation = client.start_cluster(request=request1)
+        print("Waiting for operation to complete...")
+        response = operation.result()
+        if response.status.state in (2, 5): # RUNNING or UPDATING
+            print("Cluster is started successfully")
+    elif response.status.state in (2, 5): # RUNNING or UPDATING
+       print("Cluster is already running")
+    else:
+        print("Cluster is unavailable")
+        raise Exception("Cluster is unavailable")
+
+def stop_the_cluster():
+    # This function is currently configured to never run as stop_cluster_check is 'False'.
+    # If you intend to stop the cluster, change `stop_cluster_check` to 'True'.
+    if stop_cluster_check == 'True':
+        try:
+            options = ClientOptions(api_endpoint="us-central1-dataproc.googleapis.com:443",
+                client_cert_source=get_client_cert)
+        except NameError:
+            options = ClientOptions(api_endpoint="us-central1-dataproc.googleapis.com:443")
+
+        client = dataproc_v1.ClusterControllerClient(client_options=options)
+        request = dataproc_v1.StopClusterRequest(
+            project_id='qwiklabs-gcp-03-6e8213d90fd1',
+            region='us-central1',
+            cluster_name='my-ac-cluster',
+        )
+        operation = client.stop_cluster(request=request)
+        print("Waiting for operation to complete...")
+        response = operation.result()
+        if response.status.state in (6, 7): # STOPPED or STOPPING
+            print("Cluster is stopped successfully")
+        print(response)
+
+with DAG(
+    'dataproc_notebook_workflow', # Changed DAG ID to reflect multi-notebook functionality
+    default_args=default_args,
+    description='Runs multiple Jupyter notebooks on a Dataproc cluster',
+    tags =['scheduler_jupyter_plugin', 'multi_notebook'],
+    schedule_interval='50 16 * * 1-5', # Schedule to run at 4:50 PM, Monday-Friday
+    catchup= False
+) as dag:
+
+    start_cluster = PythonOperator(
+        task_id='start_cluster',
+        python_callable=get_cluster_state_start_if_not_running,
+        retries= 2,
+        provide_context=True,
+    )
+
+    # Task for notebooka.ipynb
+    input_notebook_a = 'gs://us-central1-testcomposer-9d6c1b93-bucket/dataproc-notebooks/7run/input_notebooks/notebooka.ipynb'
+    output_notebook_a = "{{ ti.xcom_pull(task_ids='generate_output_file_notebooka', key='output_file_path_notebooka') }}"
+    notebook_args_a = [input_notebook_a, output_notebook_a]
+    parameters_a = '''
+    {"param1": "value1", "param2": "value2"}
+    '''
+    if parameters_a.strip():
+        notebook_args_a.extend(["--parameters", parameters_a])
+
+    write_output_task_a = PythonOperator(
+        task_id='generate_output_file_notebooka',
+        python_callable=write_output_to_file,
+        provide_context=True,
+        op_kwargs={'run_id': '{{ ds_nodash }}', 'notebook_name': 'notebooka.ipynb'}, # ds_nodash provides a date string
+    )
+
+    submit_pyspark_job_a = DataprocSubmitJobOperator(
+        task_id='submit_notebooka_job',
+        project_id='qwiklabs-gcp-03-6e8213d90fd1',
+        region='us-central1',
+        job={
+            'reference': {'project_id': 'qwiklabs-gcp-03-6e8213d90fd1'},
+            'placement': {'cluster_name': 'my-ac-cluster'},
+            'labels': {'client': 'scheduler-jupyter-plugin'},
+            'pyspark_job': {
+                'main_python_file_uri': 'gs://us-central1-testcomposer-9d6c1b93-bucket/dataproc-notebooks/wrapper_papermill.py',
+                'args' : notebook_args_a
+            },
+        },
+        gcp_conn_id='google_cloud_default',
+    )
+
+    # Task for notebookb.ipynb
+    input_notebook_b = 'gs://us-central1-testcomposer-9d6c1b93-bucket/dataproc-notebooks/7run/input_notebooks/notebookb.ipynb'
+    output_notebook_b = "{{ ti.xcom_pull(task_ids='generate_output_file_notebookb', key='output_file_path_notebookb') }}"
+    notebook_args_b = [input_notebook_b, output_notebook_b]
+    parameters_b = '''
+    {"param_b1": "val_b1"}
+    '''
+    if parameters_b.strip():
+        notebook_args_b.extend(["--parameters", parameters_b])
+
+    write_output_task_b = PythonOperator(
+        task_id='generate_output_file_notebookb',
+        python_callable=write_output_to_file,
+        provide_context=True,
+        op_kwargs={'run_id': '{{ ds_nodash }}', 'notebook_name': 'notebookb.ipynb'},
+    )
+
+    submit_pyspark_job_b = DataprocSubmitJobOperator(
+        task_id='submit_notebookb_job',
+        project_id='qwiklabs-gcp-03-6e8213d90fd1',
+        region='us-central1',
+        job={
+            'reference': {'project_id': 'qwiklabs-gcp-03-6e8213d90fd1'},
+            'placement': {'cluster_name': 'my-ac-cluster'},
+            'labels': {'client': 'scheduler-jupyter-plugin'},
+            'pyspark_job': {
+                'main_python_file_uri': 'gs://us-central1-testcomposer-9d6c1b93-bucket/dataproc-notebooks/wrapper_papermill.py',
+                'args' : notebook_args_b
+            },
+        },
+        gcp_conn_id='google_cloud_default',
+    )
+
+    stop_cluster = PythonOperator(
+        task_id='stop_cluster',
+        python_callable=stop_the_cluster,
+        provide_context=True,
+    )
+
+    # Define the task dependencies
+    start_cluster >> write_output_task_a >> submit_pyspark_job_a >> write_output_task_b >> submit_pyspark_job_b >> stop_cluster
+This is the scheduled jobs view:
+
+ 
+This shows the schedule job notebooka running first:
+ 
+
+Subsequently followed by notebookb:
+ 
+
+Running local kernel in parallel:
+Tested 5 local kernel, at the end of each run we included a write to bucket to ensure that the kernels are running at the same time.
+  
+Writing Jobs to bucket:
+
+This is a test to show that the jobs can be written successfully to bucket:
+ 
+
+Parallel job run from different workbench instance:
+1.	Jupyter instance 1
+ 
+2. Jupyter instance 2
+ 
+3. Run jobs simultaneous on 2 different instances:
+
+Instance 1:
+ 
+
+Instance 2:
+ 
+
+Parallel job run from different notebook:
+Running 2 jobs in 2 different notebook:
+Running scenario 1:
+ 
+
+Running Scenario 2:
+ 
+
+
+Python notebook within a folder and using composer to run a job:
+Place a notebook within a folder project1
+ 
+Run a composer job:
+ 
+Tested job run without issues:
+ 
+ 
+
+Code requirement for testing:
+Code for composer testing:
+composer testing original 
+import os
+import time
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import rand, col, sum, count, when, avg, stddev, row_number
+from pyspark.sql.window import Window
+from pyspark.sql.types import DoubleType
+
+# --- Spark Session Setup ---
+spark = SparkSession.builder \
+    .appName("ComplexPySparkJobExtended") \
+    .config("spark.sql.shuffle.partitions", 500) \
+    .config("spark.executor.memory", "4g") \
+    .config("spark.driver.memory", "2g") \
+    .getOrCreate()
+
+print("Spark Session created successfully.")
+
+num_rows = 50  # Significantly increased for longer runtime (1 billion)
+num_partitions = 50     # Increased partitions
+
+print(f"Generating a DataFrame with {num_rows} rows across {num_partitions} partitions...")
+large_df = spark.range(num_rows).withColumn("value", rand() * 1000) \
+                                .withColumn("category", (rand() * 10).cast("integer")) \
+                                .withColumn("subcategory", (rand() * 50).cast("integer")) \
+                                .repartition(num_partitions)
+print("Data generation complete.")
+
+transformed_df_1 = large_df.filter(col("value") > 100) \
+                           .withColumn("is_high_value", when(col("value") > 900, True).otherwise(False)) \
+                           .withColumn("processed_value", col("value") * 1.05 + 50)
+
+# First aggregation
+grouped_df = transformed_df_1.groupBy("category", "subcategory") \
+                             .agg(count("*").alias("record_count"),
+                                  sum("value").alias("total_value"),
+                                  avg("processed_value").alias("avg_processed_value"),
+                                  stddev("value").alias("stddev_value"),
+                                  sum(when(col("is_high_value"), 1).otherwise(0)).alias("high_value_count"))
+
+# Introduce a window function for more complexity
+window_spec_category = Window.partitionBy("category").orderBy(col("total_value").desc())
+ranked_grouped_df = grouped_df.withColumn("rank_in_category", row_number().over(window_spec_category)) \
+                              .withColumn("avg_value_over_category", avg("total_value").over(Window.partitionBy("category")))
+
+lookup_data = [(i, f"Category_{i}") for i in range(10)]
+lookup_df = spark.createDataFrame(lookup_data, ["category", "category_name"])
+
+# Join with lookup_df
+joined_df = ranked_grouped_df.join(lookup_df, on="category", how="left") \
+                      .repartition(num_partitions // 4)
+
+# Add another aggregation or complex operation
+final_aggregated_df = joined_df.groupBy("category_name") \
+                               .agg(count("*").alias("final_record_count"),
+                                    sum("total_value").alias("overall_total_value"),
+                                    avg("avg_processed_value").alias("overall_avg_processed_value"),
+                                    sum(when(col("rank_in_category") <= 3, 1).otherwise(0)).alias("top_3_subcategories_count"))
+
+sorted_df = final_aggregated_df.sort(col("overall_total_value").desc())
+
+print("Triggering action (collecting a small sample) and measuring execution time...")
+start_time = time.time()
+sorted_df.show(10, truncate=False)
+end_time = time.time()
+execution_time = end_time - start_time
+print(f"\nComplex PySpark job completed in {execution_time:.2f} seconds.")
+
+# --- Stop Spark Session ---
+spark.stop()
+print("Spark Session stopped.")
+
+Code for composer testing (export parquet):
+composer testing (export parquet) 
+import os
+import time
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import rand, col, sum, count, when, avg, stddev, row_number
+from pyspark.sql.window import Window
+from pyspark.sql.types import DoubleType
+
+# Define your GCS output path
+GCS_OUTPUT_PATH = "gs://test-ac-bucket-1/output.parquet" # <--- IMPORTANT: Change this to your desired GCS bucket and path
+
+# --- Spark Session Setup ---
+spark = SparkSession.builder \
+    .appName("ComplexPySparkJobExtended") \
+    .config("spark.sql.shuffle.partitions", 500) \
+    .config("spark.executor.memory", "4g") \
+    .config("spark.driver.memory", "2g") \
+    .getOrCreate()
+
+print("Spark Session created successfully.")
+
+num_rows = 50  # Significantly increased for longer runtime (1 billion)
+num_partitions = 50     # Increased partitions
+
+print(f"Generating a DataFrame with {num_rows} rows across {num_partitions} partitions...")
+large_df = spark.range(num_rows).withColumn("value", rand() * 1000) \
+                                .withColumn("category", (rand() * 10).cast("integer")) \
+                                .withColumn("subcategory", (rand() * 50).cast("integer")) \
+                                .repartition(num_partitions)
+print("Data generation complete.")
+
+transformed_df_1 = large_df.filter(col("value") > 100) \
+                           .withColumn("is_high_value", when(col("value") > 900, True).otherwise(False)) \
+                           .withColumn("processed_value", col("value") * 1.05 + 50)
+
+# First aggregation
+grouped_df = transformed_df_1.groupBy("category", "subcategory") \
+                             .agg(count("*").alias("record_count"),
+                                  sum("value").alias("total_value"),
+                                  avg("processed_value").alias("avg_processed_value"),
+                                  stddev("value").alias("stddev_value"),
+                                  sum(when(col("is_high_value"), 1).otherwise(0)).alias("high_value_count"))
+
+# Introduce a window function for more complexity
+window_spec_category = Window.partitionBy("category").orderBy(col("total_value").desc())
+ranked_grouped_df = grouped_df.withColumn("rank_in_category", row_number().over(window_spec_category)) \
+                              .withColumn("avg_value_over_category", avg("total_value").over(Window.partitionBy("category")))
+
+lookup_data = [(i, f"Category_{i}") for i in range(10)]
+lookup_df = spark.createDataFrame(lookup_data, ["category", "category_name"])
+
+# Join with lookup_df
+joined_df = ranked_grouped_df.join(lookup_df, on="category", how="left") \
+                      .repartition(num_partitions // 4)
+
+# Add another aggregation or complex operation
+final_aggregated_df = joined_df.groupBy("category_name") \
+                               .agg(count("*").alias("final_record_count"),
+                                    sum("total_value").alias("overall_total_value"),
+                                    avg("avg_processed_value").alias("overall_avg_processed_value"),
+                                    sum(when(col("rank_in_category") <= 3, 1).otherwise(0)).alias("top_3_subcategories_count"))
+
+sorted_df = final_aggregated_df.sort(col("overall_total_value").desc())
+
+print("Triggering action (collecting a small sample) and measuring execution time...")
+start_time = time.time()
+sorted_df.show(10, truncate=False)
+end_time = time.time()
+execution_time = end_time - start_time
+print(f"\nComplex PySpark job completed in {execution_time:.2f} seconds.")
+
+# --- Write DataFrame to Parquet file in GCS ---
+print(f"Writing sorted_df to Parquet file at: {GCS_OUTPUT_PATH}")
+sorted_df.write.mode("overwrite").parquet(GCS_OUTPUT_PATH) # Added this line to write to Parquet
+print("DataFrame successfully written to Parquet.")
+
+# --- Stop Spark Session ---
+spark.stop()
+print("Spark Session stopped.")
+
+Code for composer testing (export json):
+composer testing (export json) 
+import os
+import time
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import rand, col, sum, count, when, avg, stddev, row_number
+from pyspark.sql.window import Window
+from pyspark.sql.types import DoubleType
+
+# Define your GCS output path for JSON
+GCS_OUTPUT_PATH_JSON = "gs:// test-ac-bucket-1/output-folder/output.json" # <--- IMPORTANT: Change this
+
+# --- Spark Session Setup ---
+spark = SparkSession.builder \
+    .appName("ComplexPySparkJobExtended") \
+    .config("spark.sql.shuffle.partitions", 500) \
+    .config("spark.executor.memory", "4g") \
+    .config("spark.driver.memory", "2g") \
+    .getOrCreate()
+
+print("Spark Session created successfully.")
+
+num_rows = 5
+num_partitions = 5
+
+print(f"Generating a DataFrame with {num_rows} rows across {num_partitions} partitions...")
+large_df = spark.range(num_rows).withColumn("value", rand() * 1000) \
+                                .withColumn("category", (rand() * 10).cast("integer")) \
+                                .withColumn("subcategory", (rand() * 50).cast("integer")) \
+                                .repartition(num_partitions)
+print("Data generation complete.")
+
+transformed_df_1 = large_df.filter(col("value") > 100) \
+                           .withColumn("is_high_value", when(col("value") > 900, True).otherwise(False)) \
+                           .withColumn("processed_value", col("value") * 1.05 + 50)
+
+grouped_df = transformed_df_1.groupBy("category", "subcategory") \
+                             .agg(count("*").alias("record_count"),
+                                  sum("value").alias("total_value"),
+                                  avg("processed_value").alias("avg_processed_value"),
+                                  stddev("value").alias("stddev_value"),
+                                  sum(when(col("is_high_value"), 1).otherwise(0)).alias("high_value_count"))
+
+window_spec_category = Window.partitionBy("category").orderBy(col("total_value").desc())
+ranked_grouped_df = grouped_df.withColumn("rank_in_category", row_number().over(window_spec_category)) \
+                              .withColumn("avg_value_over_category", avg("total_value").over(Window.partitionBy("category")))
+
+lookup_data = [(i, f"Category_{i}") for i in range(10)]
+lookup_df = spark.createDataFrame(lookup_data, ["category", "category_name"])
+
+joined_df = ranked_grouped_df.join(lookup_df, on="category", how="left") \
+                      .repartition(num_partitions // 4)
+
+final_aggregated_df = joined_df.groupBy("category_name") \
+                               .agg(count("*").alias("final_record_count"),
+                                    sum("total_value").alias("overall_total_value"),
+                                    avg("avg_processed_value").alias("overall_avg_processed_value"),
+                                    sum(when(col("rank_in_category") <= 3, 1).otherwise(0)).alias("top_3_subcategories_count"))
+
+sorted_df = final_aggregated_df.sort(col("overall_total_value").desc())
+
+print("Triggering action (collecting a small sample) and measuring execution time...")
+start_time = time.time()
+sorted_df.show(10, truncate=False)
+end_time = time.time()
+execution_time = end_time - start_time
+print(f"\nComplex PySpark job completed in {execution_time:.2f} seconds.")
+
+# --- Write DataFrame to JSON file in GCS ---
+print(f"Writing sorted_df to JSON file at: {GCS_OUTPUT_PATH_JSON}")
+# Consider repartitioning here if the number of partitions is very high for small data
+sorted_df.write.mode("overwrite").json(GCS_OUTPUT_PATH_JSON)
+print("DataFrame successfully written to JSON.")
+
+# --- Stop Spark Session ---
+spark.stop()
+print("Spark Session stopped.")
+
+Code for remote kernel testing 1:
+Remote kernel testing 
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import rand, col, sum, count, when, avg, stddev, row_number # Added row_number
+from pyspark.sql.window import Window
+from pyspark.sql.types import DoubleType
+
+# Set JAVA_HOME environment variable
+java_home_path = "/usr/lib/jvm/java-11-openjdk-amd64"
+os.environ["JAVA_HOME"] = java_home_path
+os.environ["PATH"] = os.environ["JAVA_HOME"] + "/bin:" + os.environ["PATH"]
+
+# --- Spark Session Setup ---
+spark = SparkSession.builder \
+    .appName("ComplexPySparkJobExtended") \
+    .config("spark.yarn.appMasterEnv.JAVA_HOME", java_home_path) \
+    .config("spark.executorEnv.JAVA_HOME", java_home_path) \
+    .config("spark.sql.shuffle.partitions", 500) \
+    .config("spark.executor.memory", "4g") \
+    .config("spark.driver.memory", "2g") \
+    .getOrCreate()
+
+print("Spark Session created successfully.")
+
+num_rows = 500  # Significantly increased for longer runtime (1 billion)
+num_partitions = 500     # Increased partitions
+
+print(f"Generating a DataFrame with {num_rows} rows across {num_partitions} partitions...")
+large_df = spark.range(num_rows).withColumn("value", rand() * 1000) \
+                                .withColumn("category", (rand() * 10).cast("integer")) \
+                                .withColumn("subcategory", (rand() * 50).cast("integer")) \
+                                .repartition(num_partitions)
+print("Data generation complete.")
+
+transformed_df_1 = large_df.filter(col("value") > 100) \
+                           .withColumn("is_high_value", when(col("value") > 900, True).otherwise(False)) \
+                           .withColumn("processed_value", col("value") * 1.05 + 50) # Added another computation
+
+# First aggregation
+grouped_df = transformed_df_1.groupBy("category", "subcategory") \
+                             .agg(count("*").alias("record_count"),
+                                  sum("value").alias("total_value"),
+                                  avg("processed_value").alias("avg_processed_value"),
+                                  stddev("value").alias("stddev_value"),
+                                  sum(when(col("is_high_value"), 1).otherwise(0)).alias("high_value_count"))
+
+# Introduce a window function for more complexity
+window_spec_category = Window.partitionBy("category").orderBy(col("total_value").desc())
+ranked_grouped_df = grouped_df.withColumn("rank_in_category", row_number().over(window_spec_category)) \
+                              .withColumn("avg_value_over_category", avg("total_value").over(Window.partitionBy("category")))
+
+lookup_data = [(i, f"Category_{i}") for i in range(10)]
+lookup_df = spark.createDataFrame(lookup_data, ["category", "category_name"])
+
+# Join with lookup_df
+joined_df = ranked_grouped_df.join(lookup_df, on="category", how="left") \
+                      .repartition(num_partitions // 4) # Adjust repartition for joined data
+
+# Add another aggregation or complex operation
+final_aggregated_df = joined_df.groupBy("category_name") \
+                               .agg(count("*").alias("final_record_count"),
+                                    sum("total_value").alias("overall_total_value"),
+                                    avg("avg_processed_value").alias("overall_avg_processed_value"),
+                                    sum(when(col("rank_in_category") <= 3, 1).otherwise(0)).alias("top_3_subcategories_count"))
+
+sorted_df = final_aggregated_df.sort(col("overall_total_value").desc())
+
+print("Triggering action (collecting a small sample) and measuring execution time...")
+start_time = time.time()
+sorted_df.show(10, truncate=False) # Show top 10 rows
+end_time = time.time()
+execution_time = end_time - start_time
+print(f"\nComplex PySpark job completed in {execution_time:.2f} seconds.")
+
+# --- Stop Spark Session ---
+spark.stop()
+print("Spark Session stopped.")
+
+Code for remote kernel testing 2:
+remote kernel testing 2 
+from pyspark.sql import SparkSession
+
+java_home_path = "/usr/lib/jvm/java-11-openjdk-amd64"
+
+spark = SparkSession.builder \
+    .appName("MyPySparkJob") \
+    .config("spark.yarn.appMasterEnv.JAVA_HOME", java_home_path) \
+    .config("spark.executorEnv.JAVA_HOME", java_home_path) \
+    .getOrCreate()
+
+data = [("Alice", 1), ("Bob", 2), ("Charlie", 3)]
+df = spark.createDataFrame(data, ["Name", "ID"])
+df.show()
+
+spark.stop()
+
+Local kernel testing:
+Local kernel testing 
+import time
+import random
+from datetime import datetime
+
+def generate_synthetic_data():
+    """Generates a single dictionary of synthetic data."""
+    data_point = {
+        "timestamp_unix": time.time(), 
+        "user_id": random.randint(1000, 9999),
+        "event_type": random.choice(["login", "logout", "purchase", "view_page"]),
+        "value": random.uniform(0.0, 1000.0)
+    }
+    return data_point
+
+def run_job_for_jupyter(duration_minutes, sample_size=10):
+    """
+    Runs the data generation and processing job for a specified duration, 
+    then prints a small, readable sample for Jupyter Notebook display.
+    """
+    duration_seconds = duration_minutes * 10
+    start_time = time.time()
+    count = 0
+    all_data_lines = [] 
+
+    header = "timestamp_unix,user_id,event_type,value"
+    all_data_lines.append(header)
+
+    print(f"Starting data generation and processing job for {duration_minutes} minute(s)...")
+
+    while (time.time() - start_time) < duration_seconds:
+        data_point = generate_synthetic_data()
+        
+        # Format the dictionary into a comma-separated string (CSV-like format)
+        data_line = f"{data_point['timestamp_unix']},{data_point['user_id']},{data_point['event_type']},{data_point['value']}"
+        all_data_lines.append(data_line)
+        
+        count += 1
+        # time.sleep(0.01) # Optional sleep
+
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print("-" * 40)
+    print(f"Job finished after {elapsed_time:.2f} seconds.")
+    print(f"Total data points generated: {count}")
+    
+    # Output a small, readable sample to the Jupyter Notebook output cell
+    print("\n--- Displaying a Sample of Generated Data ---")
+    print(header)
+    # Print only the first N lines as a readable text output
+    for line in all_data_lines[1:sample_size + 1]:
+        print(line)
+    
+    if count > sample_size:
+        print(f"... and {count - sample_size} more lines (full data generated in memory, only top {sample_size} displayed).")
+
+
+# --- Execute the function in your Jupyter Notebook ---
+# This will run for 1 minute and print the first 10 data points.
+run_job_for_jupyter(1, sample_size=10)
+
+Example for DAG.py copy to bucket
+DAG copy example to bucket 
+!gcloud storage cp dataproc_notebook_workflow.py gs://us-central1-testcomposer-9d6c1b93-bucket/dags/dataproc_notebook_workflow.py
+
+Create a dataproc cluster with jupyter
+create a dataproc cluster with jupyter 
+gcloud dataproc clusters create "my-ac-cluster" \
+    --region=us-central1 \
+    --master-machine-type=e2-standard-4 \
+    --master-boot-disk-size=30 \
+    --worker-machine-type=e2-standard-4 \
+    --worker-boot-disk-size=30 \
+    --optional-components=JUPYTER \
+    --enable-component-gateway
+
+
