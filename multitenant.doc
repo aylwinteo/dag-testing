@@ -1,0 +1,93 @@
+AMLPSGG - Dataproc Multi-tenancy
+Referencing the following setup https://docs.cloud.google.com/dataproc/docs/concepts/iam/sa-multi-tenancy#dataproc_create__multi_tenancy_cluster-gcloud
+All test were conducted on qwiklab:
+Create a workbench with a user account example user1 using the IAM service account:
+ 
+
+Create an identity-config-file:
+
+Create a identity-config.yaml file and place it in a GCS bucket
+
+identity-config-file 
+user_service_account_mapping:
+  user1-simulated@example.com: user1-sa@qwiklabs-gcp-04-c5b46c1ff43b.iam.gserviceaccount.com
+  user2-simulated@example.com: user2-sa@qwiklabs-gcp-04-c5b46c1ff43b.iam.gserviceaccount.com
+
+Create a multitenant dataproc cluster (zero-scale):
+Please note that the dataproc will have an additional role know as service account token creator
+Dataproc multitenant zero-scale 
+gcloud dataproc clusters create ac-cluster \
+    --region=asia-southeast1 \
+    --secure-multi-tenancy-user-mapping=ac-interactive@ac-project-485203.iam.gserviceaccount.com:ac-interactive@ac-project-485203.iam.gserviceaccount.com \
+    --properties dataproc:dataproc.dynamic.multi.tenancy.enabled=true,core:fs.defaultFS=gs://team-485203 \
+    --master-boot-disk-size 100GB \
+    --worker-boot-disk-size 100GB \
+    --cluster-type=zero-scale \
+    --autoscaling-policy=zero-scale-policy \
+    --master-machine-type "e2-standard-8" \
+    --worker-machine-type "e2-standard-8” \
+    --service-account=ac-spark@team-485203.iam.gserviceaccount.com \
+    --optional-components=JUPYTER_KERNEL_GATEWAY \
+    --enable-component-gateway
+
+Create a multitenant dataproc cluster:
+Please note that the dataproc will have an additional role know as service account token creator
+create a multi-tenant dataproc cluster 
+!gcloud dataproc clusters create "my-ac-cluster" \
+    --region=us-central1 \
+    --identity-config-file=gs://test-ac-bucket-1/config/user_mapping.yaml \
+    --master-machine-type=e2-standard-8 \
+    --master-boot-disk-size=30 \
+    --worker-machine-type=e2-standard-8 \
+    --worker-boot-disk-size=30 \
+    --optional-components=JUPYTER_KERNEL_GATEWAY \
+    --properties "dataproc:dataproc.dynamic.multi.tenancy.enabled=true" \
+    --service-account=dataproc-test@qwiklabs-gcp-03-6e8213d90fd1.iam.gserviceaccount.com \
+    --scopes=https://www.googleapis.com/auth/iam \
+    --enable-component-gateway
+ 
+Grant the necessary permissions to the user accounts:
+Ensure user1 is granted the permissions to its own bucket example read write permissions to bucket.
+ 
+
+Testing:
+You can use the code over here AMLPSGG - Scheduling multiple ipynb to write to bucket and try different bucket. Here are the test conducted:
+Impersonation change confirmed in DAG:
+ 
+Composer job ran successfully and wrote to bucket:
+
+ 
+
+ 
+ 
+ 
+
+Tested with a bucket the user does not have access to:
+ 
+Test before 9th December 2025
+With additional requirements:
+base on a users service account it requires the following:
+
+Requires the service account token creator 
+
+ 
+
+Requires access to the staging bucket
+ 
+
+Access to the AC/own bucket
+ 
+
+Dataproc access required:
+
+ 
+
+Test via gcloud job submit, does not allow read and write to another users bucket:
+
+ 
+
+Test via gcloud job submit, allows read and write to own bucket:
+
+ 
+
+
